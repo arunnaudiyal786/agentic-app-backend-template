@@ -35,6 +35,21 @@ output/*.json
 output/*.csv
 output/*.png
 
+# Input files (keep sample)
+input/*.json
+!input/sample_*.json
+
+# ChromaDB
+data/chroma/
+
+# Session audit trails (keep directory structure)
+sessions/
+!sessions/.gitkeep
+
+# Dev scripts
+.server.pid
+
 # Logs
 *.log
 logs/
+CLAUDE.md
