@@ -1,6 +1,6 @@
 # Python FastAPI Backend Design Patterns Guide
 
-> A comprehensive guide to building scalable, maintainable Python backends using FastAPI, LangGraph, and modern async patterns.
+> A comprehensive guide to building scalable, maintainable Python backends using FastAPI, LangGraph, and modern async patterns — grounded in the actual ele-real-ph1-backend codebase.
 
 ## Table of Contents
 
@@ -8,13 +8,16 @@
 2. [Project Structure](#project-structure)
 3. [Component-as-Service Architecture](#component-as-service-architecture)
 4. [State Management Patterns](#state-management-patterns)
-5. [API Design Patterns](#api-design-patterns)
-6. [Session & Output Storage](#session--output-storage)
-7. [Configuration Management](#configuration-management)
-8. [Error Handling Strategy](#error-handling-strategy)
-9. [Async Patterns](#async-patterns)
-10. [Singleton Services](#singleton-services)
-11. [Quick Reference](#quick-reference)
+5. [Hybrid Search & RRF Fusion](#hybrid-search--rrf-fusion)
+6. [RAG Ingestion Patterns](#rag-ingestion-patterns)
+7. [API Design Patterns](#api-design-patterns)
+8. [Session & Output Storage](#session--output-storage)
+9. [Configuration Management](#configuration-management)
+10. [Error Handling Strategy](#error-handling-strategy)
+11. [Async Patterns](#async-patterns)
+12. [Singleton Services](#singleton-services)
+13. [LLM Prompt Authoring](#llm-prompt-authoring)
+14. [Quick Reference](#quick-reference)
 
 ---
 
@@ -26,10 +29,35 @@
 |-----------|-------------|
 | **Component Isolation** | Each feature lives in its own directory with standardized file structure |
 | **Single Responsibility** | Services handle business logic; agents handle workflow integration; routers handle HTTP |
-| **Type Safety** | Pydantic models for all data boundaries; Generic types for reusable base classes |
+| **Type Safety** | Pydantic models for all data boundaries; TypedDict for LangGraph state |
 | **Async-First** | All I/O operations are async; enables non-blocking concurrent execution |
 | **Partial State Updates** | Workflow agents return only changed fields; framework handles merging |
 | **Audit Everything** | Every LLM call, search, and decision is persisted for debugging and compliance |
+
+### Why TypedDict for LangGraph State, Not Pydantic
+
+LangGraph nodes return **partial state updates** — each node returns only the fields it changed. LangGraph's runtime merges these partials into the cumulative state. Pydantic models require all required fields at instantiation, which would force every node to copy the entire state even for unchanged fields.
+
+`TypedDict` with `total=False` solves this: all keys are optional, so a node can return just `{"functional_query": "...", "technical_query": "..."}` and LangGraph will shallow-merge it into the existing state without clobbering fields set by previous nodes.
+
+```python
+# ✅ CORRECT: TypedDict with total=False
+class PipelineState(TypedDict, total=False):
+    session_id: str
+    input_story: str
+    functional_query: str   # set by node 1
+    technical_query: str    # set by node 1
+    top5_stories: list      # set by node 2
+    component_mapping: dict # set by node 3
+    status: str
+    error_message: str
+
+# ❌ WRONG: Pydantic model — requires all fields on construction
+class PipelineState(BaseModel):
+    session_id: str
+    input_story: str
+    functional_query: Optional[str] = None  # verbose and fragile
+```
 
 ### When to Use This Architecture
 
@@ -45,78 +73,84 @@ This architecture is well-suited for:
 
 ## Project Structure
 
-### Recommended Directory Layout
+### Actual Directory Layout
 
 ```
-my-backend/
-├── app/                          # Main application code
+ele-real-ph1-backend/
+├── src/
 │   ├── __init__.py
-│   ├── main.py                   # FastAPI app initialization
-│   │
-│   ├── components/               # Feature components
-│   │   ├── base/                 # Shared base classes
-│   │   │   ├── component.py      # BaseComponent abstract class
-│   │   │   ├── config.py         # Settings (Pydantic)
-│   │   │   ├── exceptions.py     # Exception hierarchy
-│   │   │   └── logging.py        # Structured logging setup
-│   │   │
-│   │   ├── {feature}/            # Each feature in own folder
-│   │   │   ├── models.py         # Pydantic schemas
-│   │   │   ├── service.py        # Business logic
-│   │   │   ├── agent.py          # Workflow node wrapper
-│   │   │   ├── router.py         # FastAPI endpoints
-│   │   │   └── prompts.py        # LLM prompts (if applicable)
-│   │   │
-│   │   ├── orchestrator/         # Workflow orchestration
-│   │   │   ├── workflow.py       # Graph definition
-│   │   │   ├── state.py          # State TypedDict
-│   │   │   └── service.py        # Execution service
-│   │   │
-│   │   └── session/              # Session management
-│   │
-│   ├── rag/                      # RAG layer (if applicable)
-│   │   ├── embeddings.py         # Embedding service
-│   │   ├── vector_store.py       # Vector DB wrapper
-│   │   └── hybrid_search.py      # Search fusion logic
-│   │
-│   ├── services/                 # Shared business services
-│   │   └── context_assembler.py  # Document loading
-│   │
-│   └── utils/                    # Utilities
-│       ├── audit.py              # Audit trail manager
-│       ├── json_repair.py        # LLM output parsing
-│       └── ollama_client.py      # LLM client
+│   └── components/
+│       ├── base/                    # Shared abstractions
+│       │   ├── component.py         # BaseComponent ABC
+│       │   ├── config.py            # Settings (dotenv)
+│       │   └── exceptions.py        # Exception hierarchy
+│       │
+│       ├── decomposition/           # Node 1: query decomposition
+│       │   ├── models.py
+│       │   ├── service.py
+│       │   ├── agent.py
+│       │   └── prompts.py
+│       │
+│       ├── hybrid_search/           # Node 2: dense + sparse + RRF
+│       │   ├── models.py
+│       │   ├── service.py           # RRF fusion logic lives here
+│       │   ├── agent.py
+│       │   ├── chroma_store.py      # Dense search (OpenAI embeddings)
+│       │   └── bm25_index.py        # Sparse search (BM25Okapi)
+│       │
+│       ├── generation/              # Node 3: GPT-4o component mapping
+│       │   ├── models.py
+│       │   ├── service.py           # Includes component ID validation
+│       │   ├── agent.py
+│       │   └── prompts.py
+│       │
+│       ├── ingestion/               # Data prep (run via scripts/ingest.py)
+│       │   ├── models.py
+│       │   └── service.py           # Chunking + Chroma/BM25 population
+│       │
+│       └── orchestrator/            # LangGraph pipeline assembly
+│           ├── state.py             # PipelineState TypedDict
+│           └── workflow.py          # Graph definition + compile
 │
-├── scripts/                      # Database & utility scripts
-│   ├── init_vector_db.py
-│   └── reindex.py
+├── src/utils/
+│   └── audit.py                     # AuditTrailManager
 │
-├── data/                         # Persistent data
-│   ├── raw/                      # Source data files
-│   └── sessions/                 # Session audit trails
+├── scripts/
+│   └── ingest.py                    # CLI wrapper for ingestion service
 │
-├── config/                       # Configuration files
-│   └── settings.yaml
+├── data/
+│   ├── raw/
+│   │   ├── stories.json             # Historical Jira stories
+│   │   └── tdds/                    # {story_id}_tdd.md files
+│   ├── chroma_db/                   # Chroma persistent store (generated)
+│   └── bm25_index.pkl               # Serialized BM25 index (generated)
 │
-├── tests/                        # Test files
+├── config/
+│   └── domain.json                  # Component catalogue (FC-xxx, TC-xxx)
 │
-├── requirements.txt
-├── .env.example
-├── CLAUDE.md                     # AI assistant context
-└── README.md
+├── output/                          # Session audit trails
+│   └── {YYYY-MM-DD-HHMM}/
+│       └── {session_id}/
+│
+├── main.py                          # CLI entry point
+├── api_server.py                    # FastAPI server
+└── requirements.txt
 ```
 
 ### Directory Responsibilities
 
 | Directory | Responsibility |
 |-----------|----------------|
-| `app/components/` | Feature modules with standardized structure |
-| `app/components/base/` | Shared abstractions (BaseComponent, Settings, Exceptions) |
-| `app/rag/` | Vector storage, embeddings, search logic |
-| `app/services/` | Cross-cutting business services |
-| `app/utils/` | General utilities (audit, JSON repair, clients) |
-| `scripts/` | One-off database scripts, migrations |
-| `data/` | Persistent storage (vector DB, sessions, uploads) |
+| `src/components/` | Feature modules with standardized structure |
+| `src/components/base/` | Shared abstractions (BaseComponent, Settings, Exceptions) |
+| `src/components/hybrid_search/` | Dense + sparse retrieval, RRF fusion |
+| `src/components/ingestion/` | Data chunking + store population |
+| `src/components/orchestrator/` | LangGraph graph definition and state |
+| `src/utils/` | General utilities (audit trail) |
+| `scripts/` | One-off CLI scripts (ingest.py) |
+| `data/` | Persistent storage (chroma_db, bm25 index, raw data) |
+| `config/` | Domain catalogue JSON |
+| `output/` | Per-session audit artifacts |
 
 ---
 
@@ -127,7 +161,7 @@ my-backend/
 Create an abstract base class that all feature services extend:
 
 ```python
-# app/components/base/component.py
+# src/components/base/component.py
 from abc import ABC, abstractmethod
 from typing import Generic, TypeVar
 
@@ -140,17 +174,13 @@ class BaseComponent(ABC, Generic[TRequest, TResponse]):
     @property
     @abstractmethod
     def component_name(self) -> str:
-        """Unique identifier for logging and metrics."""
+        """Unique identifier for logging and audit."""
         pass
 
     @abstractmethod
     async def process(self, request: TRequest) -> TResponse:
         """Main processing entry point."""
         pass
-
-    async def health_check(self) -> dict:
-        """Component-level health status."""
-        return {"component": self.component_name, "status": "healthy"}
 
     async def __call__(self, request: TRequest) -> TResponse:
         """Allow direct invocation: component(request)."""
@@ -161,151 +191,102 @@ class BaseComponent(ABC, Generic[TRequest, TResponse]):
 - Type-safe via Python generics
 - Enforces consistent interface
 - Easy to mock for testing
-- Works with both REST and workflow integrations
+- Works with both REST and LangGraph workflow integrations
 
 ### Standard Component File Structure
 
 Every feature component should have these files:
 
-#### 1. models.py - Data Schemas
+#### 1. models.py — Data Schemas
 
 ```python
-# app/components/{feature}/models.py
-from pydantic import BaseModel, Field
-from typing import Optional, List
+# src/components/{feature}/models.py
+from dataclasses import dataclass, field
+from typing import Any
 
-class FeatureRequest(BaseModel):
-    """Input schema for the feature."""
-    session_id: str = Field(..., description="Session identifier")
-    input_data: str = Field(..., min_length=1, max_length=10000)
-    options: Optional[dict] = Field(default=None)
-
-class FeatureResponse(BaseModel):
-    """Output schema for the feature."""
+@dataclass
+class FeatureRequest:
     session_id: str
-    result: dict
-    metadata: Optional[dict] = None
+    input_data: str
+
+@dataclass
+class FeatureResponse:
+    session_id: str
+    result: dict[str, Any] = field(default_factory=dict)
 ```
 
-#### 2. service.py - Business Logic
+> **Note:** This codebase uses `dataclasses` for internal pipeline models (request/response) and `Pydantic` only at the HTTP API boundary. Dataclasses are lighter-weight and sufficient for internal contracts.
+
+#### 2. service.py — Business Logic
 
 ```python
-# app/components/{feature}/service.py
-from app.components.base.component import BaseComponent
-from app.components.base.logging import get_logger
+# src/components/{feature}/service.py
+from src.components.base.component import BaseComponent
+from src.utils.audit import AuditTrailManager
 from .models import FeatureRequest, FeatureResponse
 
-logger = get_logger("feature")
+_STEP = "step_N_feature_name"
 
 class FeatureService(BaseComponent[FeatureRequest, FeatureResponse]):
-    """Business logic for the feature."""
 
     @property
     def component_name(self) -> str:
-        return "feature"
+        return _STEP
 
     async def process(self, request: FeatureRequest) -> FeatureResponse:
-        logger.info("processing_request", session_id=request.session_id)
+        audit = AuditTrailManager(request.session_id)
+        audit.start_timer(_STEP)
 
-        # Business logic here
+        audit.save_json("request.json", {"input": request.input_data}, subfolder=_STEP)
+
         result = await self._do_work(request.input_data)
 
-        return FeatureResponse(
-            session_id=request.session_id,
-            result=result,
-        )
+        audit.save_json("parsed_output.json", result, subfolder=_STEP)
+        audit.stop_timer(_STEP)
 
-    async def _do_work(self, data: str) -> dict:
-        """Internal processing logic."""
-        # Implementation details
-        pass
+        return FeatureResponse(session_id=request.session_id, result=result)
 ```
 
-#### 3. agent.py - Workflow Node Wrapper
+#### 3. agent.py — LangGraph Node Wrapper
 
 ```python
-# app/components/{feature}/agent.py
-from typing import Any, Dict
+# src/components/{feature}/agent.py
+from typing import Any
 from .service import FeatureService
 from .models import FeatureRequest
 
 _service: FeatureService | None = None
 
-def get_service() -> FeatureService:
-    """Singleton service getter."""
+def _get_service() -> FeatureService:
+    """Lazy singleton init."""
     global _service
     if _service is None:
         _service = FeatureService()
     return _service
 
-async def feature_agent(state: Dict[str, Any]) -> Dict[str, Any]:
-    """LangGraph node wrapper for the feature service.
+async def feature_agent(state: dict[str, Any]) -> dict[str, Any]:
+    """LangGraph node: returns ONLY changed fields (partial state update)."""
+    service = _get_service()
+    request = FeatureRequest(
+        session_id=state["session_id"],
+        input_data=state["input_story"],
+    )
+    response = await service.process(request)
 
-    IMPORTANT: Returns ONLY changed fields (partial state update).
-    """
-    service = get_service()
-
-    try:
-        request = FeatureRequest(
-            session_id=state["session_id"],
-            input_data=state["input_data"],
-        )
-        response = await service.process(request)
-
-        # Return ONLY changed fields
-        return {
-            "feature_output": response.result,
-            "status": "feature_complete",
-            "current_agent": "next_agent",
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error_message": str(e),
-            "current_agent": "error_handler",
-        }
-```
-
-#### 4. router.py - API Endpoints
-
-```python
-# app/components/{feature}/router.py
-from fastapi import APIRouter, Depends, HTTPException
-from app.components.base.exceptions import ComponentError
-from .service import FeatureService
-from .models import FeatureRequest, FeatureResponse
-
-router = APIRouter(prefix="/feature", tags=["Feature"])
-
-_service: FeatureService | None = None
-
-def get_service() -> FeatureService:
-    global _service
-    if _service is None:
-        _service = FeatureService()
-    return _service
-
-@router.post("/process", response_model=FeatureResponse)
-async def process_feature(
-    request: FeatureRequest,
-    service: FeatureService = Depends(get_service),
-) -> FeatureResponse:
-    """Process a feature request."""
-    try:
-        return await service.process(request)
-    except ComponentError as e:
-        raise HTTPException(status_code=400, detail=e.to_dict())
+    # Return ONLY new/changed fields
+    return {
+        "feature_output": response.result,
+        "status": "feature_complete",
+    }
 ```
 
 ### Component Integration Points
 
-A component can be used in multiple ways:
-
 | Integration | How | Use Case |
 |-------------|-----|----------|
-| **REST API** | Via router.py endpoints | Direct HTTP calls |
-| **Workflow Node** | Via agent.py wrapper | LangGraph orchestration |
-| **Direct Call** | Via service.process() | Internal service-to-service |
+| **LangGraph Node** | Via `agent.py` wrapper | Pipeline orchestration |
+| **REST API** | Via `router.py` endpoints | Direct HTTP calls |
+| **Direct Call** | Via `service.process()` | Internal service-to-service |
 | **Testing** | Via service instance | Unit/integration tests |
 
 ---
@@ -317,40 +298,35 @@ A component can be used in multiple ways:
 Use `TypedDict` with `total=False` for partial state updates:
 
 ```python
-# app/components/orchestrator/state.py
-from typing import TypedDict, List, Dict, Optional, Literal, Annotated
-import operator
+# src/components/orchestrator/state.py
+from typing import Any, TypedDict
 
-class WorkflowState(TypedDict, total=False):
-    """Workflow state allowing partial updates.
+class PipelineState(TypedDict, total=False):
+    """State flowing through the LangGraph pipeline.
 
-    total=False means all fields are optional,
-    enabling agents to return only changed fields.
+    Fields are populated progressively by each node.
+    total=False enables agents to return partial state updates.
     """
 
-    # Session Context (set once at start)
+    # Session (generated once, threaded through all nodes)
     session_id: str
-    input_text: str
 
-    # Agent Outputs (set by individual agents)
-    step1_output: Dict
-    step2_output: Dict
-    step3_output: Dict
+    # Input
+    input_story: str
 
-    # Control Fields
-    status: Literal[
-        "started",
-        "step1_complete",
-        "step2_complete",
-        "step3_complete",
-        "completed",
-        "error",
-    ]
-    current_agent: str
-    error_message: Optional[str]
+    # Node 1: Query Decomposition
+    functional_query: str
+    technical_query: str
 
-    # Append-only fields (use reducer)
-    messages: Annotated[List[Dict], operator.add]
+    # Node 2: Hybrid Search + RRF Fusion
+    top5_stories: list[dict[str, Any]]
+
+    # Node 3: Generation
+    component_mapping: dict[str, Any]
+
+    # Pipeline metadata
+    status: str
+    error_message: str
 ```
 
 ### Partial State Update Pattern
@@ -359,95 +335,188 @@ class WorkflowState(TypedDict, total=False):
 
 ```python
 # ✅ CORRECT: Partial update
-async def my_agent(state: Dict[str, Any]) -> Dict[str, Any]:
-    result = await do_work(state["input_text"])
+async def decomposition_agent(state: dict[str, Any]) -> dict[str, Any]:
+    result = await service.process(...)
     return {
-        "step1_output": result,
-        "status": "step1_complete",
-        "current_agent": "step2",
+        "functional_query": result.functional_query,
+        "technical_query": result.technical_query,
+        "status": "decomposition_complete",
     }
 
 # ❌ WRONG: Copying unchanged fields
-async def my_agent(state: Dict[str, Any]) -> Dict[str, Any]:
-    result = await do_work(state["input_text"])
+async def decomposition_agent(state: dict[str, Any]) -> dict[str, Any]:
+    result = await service.process(...)
     return {
-        "session_id": state["session_id"],  # DON'T copy!
-        "input_text": state["input_text"],  # DON'T copy!
-        "step1_output": result,
-        "status": "step1_complete",
+        "session_id": state["session_id"],    # DON'T copy!
+        "input_story": state["input_story"],  # DON'T copy!
+        "functional_query": result.functional_query,
+        "status": "decomposition_complete",
     }
 ```
 
 **Why This Matters:**
-- LangGraph auto-merges partial returns
+- LangGraph auto-merges partial returns via shallow dict merge
 - Prevents accidental state loss
 - Enables parallel agent execution
 - Reduces boilerplate code
 
-### Append-Only Fields with Reducers
-
-For fields that should accumulate rather than replace:
-
-```python
-from typing import Annotated
-import operator
-
-class WorkflowState(TypedDict, total=False):
-    # This field APPENDS new items instead of replacing
-    messages: Annotated[List[Dict], operator.add]
-
-# In agent
-return {
-    "messages": [{"role": "agent1", "content": "Done"}]
-}
-# Result: New message APPENDED to existing list
-```
-
 ### Workflow Graph Definition
 
 ```python
-# app/components/orchestrator/workflow.py
+# src/components/orchestrator/workflow.py
 from langgraph.graph import StateGraph, END
-from .state import WorkflowState
+from .state import PipelineState
 
-def create_workflow() -> StateGraph:
-    """Create the complete workflow graph."""
-    workflow = StateGraph(WorkflowState)
+def build_pipeline() -> StateGraph:
+    workflow = StateGraph(PipelineState)
 
-    # Add nodes
-    workflow.add_node("step1", step1_agent)
-    workflow.add_node("step2", step2_agent)
-    workflow.add_node("step3", step3_agent)
-    workflow.add_node("error_handler", error_handler_node)
+    workflow.add_node("query_decomposition", decomposition_agent)
+    workflow.add_node("hybrid_search", hybrid_search_agent)
+    workflow.add_node("generation", generation_agent)
 
-    # Set entry point
-    workflow.set_entry_point("step1")
-
-    # Linear edges
-    workflow.add_edge("step1", "step2")
-    workflow.add_edge("step2", "step3")
-    workflow.add_edge("step3", END)
-
-    # Conditional routing
-    workflow.add_conditional_edges(
-        "step1",
-        route_after_step1,
-        {
-            "step2": "step2",
-            "error_handler": "error_handler",
-        }
-    )
-
-    workflow.add_edge("error_handler", END)
+    workflow.set_entry_point("query_decomposition")
+    workflow.add_edge("query_decomposition", "hybrid_search")
+    workflow.add_edge("hybrid_search", "generation")
+    workflow.add_edge("generation", END)
 
     return workflow.compile()
-
-def route_after_step1(state: WorkflowState) -> str:
-    """Route based on state after step1."""
-    if state.get("status") == "error":
-        return "error_handler"
-    return "step2"
 ```
+
+---
+
+## Hybrid Search & RRF Fusion
+
+This is the core retrieval pattern of the project. It combines two fundamentally different retrieval mechanisms and merges them using Reciprocal Rank Fusion.
+
+### Why Two Indices?
+
+| Index | Type | Strength | Weakness |
+|-------|------|----------|----------|
+| **Chroma + OpenAI embeddings** | Dense (semantic) | Captures meaning, synonyms, related concepts | Misses exact keyword matches (e.g., "834 feed", procedure codes) |
+| **BM25Okapi** | Sparse (lexical) | Exact keyword and term-frequency matching | No semantic understanding |
+
+Healthcare payer stories contain domain-specific codes ("834 feed", "HIPAA 270/271", "CPT codes") that dense embeddings may normalize away. BM25 catches these while dense search catches semantic similarity.
+
+### Two-Pass RRF Pattern
+
+The search executes **4 retrieval calls** per query, then merges with 2 passes of RRF:
+
+```
+functional_query → dense search  ─┐
+functional_query → BM25 search   ─┤─ RRF pass 1 → functional_merged ─┐
+                                   │                                    │
+technical_query  → dense search  ─┐                                    ├─ RRF pass 2 → final_merged
+technical_query  → BM25 search   ─┤─ RRF pass 1 → technical_merged  ─┘
+```
+
+**Why two RRF passes instead of one?**
+Merging all 4 lists in a single pass would allow the functional sub-query (usually producing more hits) to dominate. The two-pass approach gives each query dimension equal weight before the final merge.
+
+### RRF Implementation
+
+```python
+@staticmethod
+def _rrf_merge(ranked_lists: list[list[dict]], k: int = RRF_K) -> list[dict]:
+    """Merge multiple ranked lists using Reciprocal Rank Fusion.
+
+    score(doc) = sum(1 / (k + rank)) across all lists where doc appears.
+    k=60 is the standard constant that dampens the influence of rank.
+    """
+    scores: dict[str, float] = defaultdict(float)
+    chunk_data: dict[str, dict] = {}
+
+    for ranked_list in ranked_lists:
+        for rank, item in enumerate(ranked_list, start=1):
+            chunk_id = item["chunk_id"]
+            scores[chunk_id] += 1.0 / (k + rank)
+            if chunk_id not in chunk_data:
+                chunk_data[chunk_id] = item
+
+    sorted_ids = sorted(scores, key=lambda cid: scores[cid], reverse=True)
+    return [{**chunk_data[cid], "rrf_score": scores[cid]} for cid in sorted_ids]
+```
+
+**Key properties:**
+- Score normalization-free — ranks from different score spaces (cosine similarity vs. BM25 score) are directly comparable
+- `k=60` is the standard constant; higher values flatten the curve (less top-rank bias)
+- Documents appearing in more lists naturally get higher scores
+
+### Post-RRF Deduplication
+
+After merging, chunks from the same story compete. The deduplication step keeps only the **top-ranked chunk per story_id** to ensure diversity in the final result set:
+
+```python
+@staticmethod
+def _deduplicate_by_story(ranked: list[dict], top_k: int = TOP_K_FINAL) -> list[dict]:
+    """Keep only the highest-ranked chunk per story_id."""
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for item in ranked:
+        sid = item["story_id"]
+        if sid not in seen:
+            seen.add(sid)
+            deduped.append(item)
+        if len(deduped) >= top_k:
+            break
+    return deduped
+```
+
+### Search Constants
+
+| Constant | Default | Purpose |
+|----------|---------|---------|
+| `TOP_K_RETRIEVAL` | 20 | Results per individual search call |
+| `TOP_K_FINAL` | 5 | Distinct stories returned after dedup |
+| `RRF_K` | 60 | Rank dampening constant |
+
+---
+
+## RAG Ingestion Patterns
+
+### Ingestion Prerequisites
+
+**CRITICAL:** `scripts/ingest.py` must run before any pipeline invocation. It populates both the Chroma vector store and the BM25 serialized index. Running the pipeline without ingestion will produce empty results or errors.
+
+```bash
+python scripts/ingest.py   # run once before using the pipeline
+```
+
+### Token-Based Chunking
+
+Documents are chunked by token count, not character count:
+
+```python
+CHUNK_SIZE = 512     # tokens per chunk
+CHUNK_OVERLAP = 128  # token overlap between consecutive chunks
+```
+
+**Why token-based?** Embedding models have context windows measured in tokens (e.g., `text-embedding-3-large` supports up to 8191 tokens). Chunking by tokens ensures each chunk fits within the embedding model's window. Character-based chunking can produce chunks that exceed token limits for certain scripts or token-dense text.
+
+### Dual Store Population
+
+Each ingested chunk is written to **both** stores:
+
+```python
+# Dense store: Chroma with OpenAI embeddings
+chroma_store.add_documents(chunks)
+
+# Sparse store: BM25Okapi in-memory, serialized to disk
+bm25_index.build(chunks)
+bm25_index.save("data/bm25_index.pkl")
+```
+
+The BM25 index file is generated from controlled internal data (not user input) and is read only within the same trusted environment. It is loaded at service startup.
+
+### Chroma vs FAISS Decision
+
+| | Chroma | FAISS |
+|--|--------|-------|
+| API style | Document-oriented (add docs with metadata) | Matrix-oriented (add raw vectors) |
+| Persistence | Built-in, via `persist_directory` | Manual (save/load index files) |
+| Metadata filtering | Native (`where={"story_id": "JIRA-101"}`) | Manual post-filter |
+| Setup complexity | Low | Medium-high |
+
+Chroma was chosen because the pipeline needs to filter results by `story_id` and `source_type` metadata. FAISS would require maintaining a separate metadata store and applying post-retrieval filters manually.
 
 ---
 
@@ -456,50 +525,30 @@ def route_after_step1(state: WorkflowState) -> str:
 ### Router Registration Pattern
 
 ```python
-# app/main.py
+# api_server.py
 from fastapi import FastAPI
-from contextlib import asynccontextmanager
+from fastapi.middleware.cors import CORSMiddleware
 
-from app.components.base.config import get_settings
-from app.components.base.logging import configure_logging
-from app.components.feature.router import router as feature_router
-from app.components.session.router import router as session_router
+app = FastAPI(title="Component Mapping API", version="1.0.0")
 
-settings = get_settings()
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application startup/shutdown lifecycle."""
-    # Startup
-    configure_logging(settings.environment)
-    # Initialize singletons, verify connections
-    yield
-    # Shutdown
-    # Cleanup resources
-
-app = FastAPI(
-    title=settings.app_name,
-    version=settings.app_version,
-    lifespan=lifespan,
-)
-
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Mount component routers
-app.include_router(session_router, prefix="/api/v1")
-app.include_router(feature_router, prefix="/api/v1")
-
-# System endpoints
-@app.get("/api/v1/health")
-async def health_check():
-    return {"status": "healthy", "version": settings.app_version}
+@app.post("/api/v1/pipeline/run")
+async def run_pipeline(request: PipelineRequest) -> PipelineResponse:
+    """Execute the full 3-node pipeline for a Jira story."""
+    pipeline = build_pipeline()
+    result = await pipeline.ainvoke({
+        "session_id": str(uuid4()),
+        "input_story": request.story,
+        "status": "started",
+    })
+    return PipelineResponse(component_mapping=result["component_mapping"])
 ```
 
 ### SSE Streaming Pattern
@@ -507,18 +556,22 @@ async def health_check():
 For real-time progress updates:
 
 ```python
-# app/components/orchestrator/router.py
-from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-
-router = APIRouter(prefix="/orchestrator", tags=["Orchestrator"])
+import json
 
 @router.post("/run/stream")
 async def run_stream(request: PipelineRequest) -> StreamingResponse:
     """Execute pipeline with real-time SSE progress updates."""
-    service = get_service()
+    async def event_generator():
+        yield f"event: start\ndata: {json.dumps({'session_id': session_id})}\n\n"
+
+        async for event in pipeline.astream(initial_state):
+            yield f"event: progress\ndata: {json.dumps(event)}\n\n"
+
+        yield f"event: complete\ndata: {json.dumps({'status': 'done'})}\n\n"
+
     return StreamingResponse(
-        service.process_streaming(request),
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -526,25 +579,6 @@ async def run_stream(request: PipelineRequest) -> StreamingResponse:
             "X-Accel-Buffering": "no",  # Disable nginx buffering
         }
     )
-
-# In service
-async def process_streaming(self, request: PipelineRequest):
-    """Generator that yields SSE events."""
-    yield f"event: start\ndata: {json.dumps({'session_id': request.session_id})}\n\n"
-
-    for step_result in await self.execute_steps():
-        yield f"event: progress\ndata: {json.dumps(step_result)}\n\n"
-
-    yield f"event: complete\ndata: {json.dumps({'status': 'done'})}\n\n"
-```
-
-### API Versioning
-
-Use URL path prefixing for API versioning:
-
-```
-/api/v1/feature/endpoint  # Current version
-/api/v2/feature/endpoint  # Future version (when needed)
 ```
 
 ---
@@ -553,196 +587,132 @@ Use URL path prefixing for API versioning:
 
 ### Session Directory Structure
 
-Organize session outputs by date and session ID:
-
 ```
-sessions/
+output/
 └── {YYYY-MM-DD-HHMM}/
     └── {session_id}/
-        ├── session_metadata.json    # Overall metadata
-        ├── step1_input/
-        │   ├── request.json         # Input data
-        │   └── extracted_data.json  # Processed input
-        ├── step2_processing/
-        │   ├── llm_request.json     # LLM call metadata
-        │   ├── input_prompt.txt     # Full prompt sent
-        │   ├── raw_response.txt     # Raw LLM output
-        │   └── parsed_output.json   # Parsed/structured output
-        └── final_output.json        # Complete result
+        ├── session_metadata.json        # Timing + steps completed
+        ├── step_1_query_decomposition/
+        │   ├── request.json             # Input story
+        │   ├── input_prompt.txt         # Full prompt sent to LLM
+        │   ├── raw_response.txt         # Raw LLM output
+        │   └── parsed_output.json       # {functional_query, technical_query}
+        ├── step_2_hybrid_search/
+        │   ├── request.json             # {functional_query, technical_query}
+        │   └── parsed_output.json       # top5_stories with full content
+        ├── step_3_generation/
+        │   ├── request.json             # {input_story, top5_story_ids}
+        │   ├── input_prompt.txt         # Full prompt sent to LLM
+        │   ├── raw_response.txt         # Raw LLM output
+        │   └── parsed_output.json       # {functional_components, technical_components}
+        └── final_output.json            # Complete {input_story, component_mapping}
 ```
 
 ### AuditTrailManager Pattern
 
 ```python
-# app/utils/audit.py
+# src/utils/audit.py
 from pathlib import Path
 from datetime import datetime
-import json
+import json, time
 
 class AuditTrailManager:
     """Manages session audit trail persistence."""
 
-    def __init__(self, session_id: str, base_dir: str = "sessions"):
+    def __init__(self, session_id: str, base_dir: str = "output"):
         self.session_id = session_id
         self.session_dir = self._get_or_create_session_dir(base_dir)
-        self._init_metadata()
+        self._timers: dict[str, float] = {}
 
-    def _get_or_create_session_dir(self, base_dir: str) -> Path:
-        """Find existing or create new session directory."""
-        base = Path(base_dir)
+    def start_timer(self, step_name: str) -> None:
+        self._timers[step_name] = time.time()
 
-        # Check if session already exists
-        for date_dir in base.iterdir():
-            session_path = date_dir / self.session_id
-            if session_path.exists():
-                return session_path
-
-        # Create new with current timestamp
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
-        session_dir = base / timestamp / self.session_id
-        session_dir.mkdir(parents=True, exist_ok=True)
-        return session_dir
-
-    def _init_metadata(self):
-        """Initialize session metadata file."""
-        metadata_file = self.session_dir / "session_metadata.json"
-        if not metadata_file.exists():
-            self.save_json("session_metadata.json", {
-                "session_id": self.session_id,
-                "created_at": datetime.now().isoformat(),
-                "steps_completed": [],
-                "timing": {},
-            })
+    def stop_timer(self, step_name: str) -> None:
+        if step_name in self._timers:
+            elapsed_ms = int((time.time() - self._timers[step_name]) * 1000)
+            self.record_timing(step_name, elapsed_ms)
 
     def save_json(self, filename: str, data: dict, subfolder: str = None) -> Path:
-        """Save JSON artifact."""
         target_dir = self.session_dir / subfolder if subfolder else self.session_dir
         target_dir.mkdir(parents=True, exist_ok=True)
-
         filepath = target_dir / filename
         with open(filepath, "w") as f:
             json.dump(data, f, indent=2, default=str)
         return filepath
 
     def save_text(self, filename: str, content: str, subfolder: str = None) -> Path:
-        """Save text artifact."""
         target_dir = self.session_dir / subfolder if subfolder else self.session_dir
         target_dir.mkdir(parents=True, exist_ok=True)
-
         filepath = target_dir / filename
-        with open(filepath, "w") as f:
-            f.write(content)
+        filepath.write_text(content)
         return filepath
-
-    def load_json(self, filename: str, subfolder: str = None) -> dict:
-        """Load JSON artifact."""
-        target_dir = self.session_dir / subfolder if subfolder else self.session_dir
-        filepath = target_dir / filename
-        with open(filepath) as f:
-            return json.load(f)
-
-    def record_timing(self, step_name: str, duration_ms: int):
-        """Record step timing in metadata."""
-        metadata = self.load_json("session_metadata.json")
-        metadata["timing"][step_name] = duration_ms
-        self.save_json("session_metadata.json", metadata)
-
-    def add_step_completed(self, step_name: str):
-        """Mark a step as completed."""
-        metadata = self.load_json("session_metadata.json")
-        if step_name not in metadata["steps_completed"]:
-            metadata["steps_completed"].append(step_name)
-        self.save_json("session_metadata.json", metadata)
-
-    def update_metadata(self, updates: dict):
-        """Update metadata with new values."""
-        metadata = self.load_json("session_metadata.json")
-        metadata.update(updates)
-        self.save_json("session_metadata.json", metadata)
 ```
 
 ### Using AuditTrailManager in Services
 
+The standard pattern in every service's `process()` method:
+
 ```python
-# In a service that calls an LLM
 async def process(self, request: FeatureRequest) -> FeatureResponse:
     audit = AuditTrailManager(request.session_id)
-    start_time = time.time()
+    audit.start_timer(_STEP)
 
-    # Save input
-    audit.save_json("request.json", request.model_dump(), subfolder="step2_processing")
+    # 1. Save inputs
+    audit.save_json("request.json", {...}, subfolder=_STEP)
 
-    # Build and save prompt
-    prompt = self._build_prompt(request)
-    audit.save_text("input_prompt.txt", prompt, subfolder="step2_processing")
+    # 2. For LLM services: save the full prompt
+    audit.save_text("input_prompt.txt", prompt, subfolder=_STEP)
 
-    # Call LLM and save metadata
-    response, metadata = await self.llm_client.generate(prompt)
-    audit.save_json("llm_request.json", metadata.__dict__, subfolder="step2_processing")
-    audit.save_text("raw_response.txt", response, subfolder="step2_processing")
+    # 3. Call LLM / search / external service
+    raw = await self._client.generate(prompt)
 
-    # Parse and save output
-    parsed = self._parse_response(response)
-    audit.save_json("parsed_output.json", parsed, subfolder="step2_processing")
+    # 4. Save raw output before parsing
+    audit.save_text("raw_response.txt", raw, subfolder=_STEP)
 
-    # Record timing
-    elapsed_ms = int((time.time() - start_time) * 1000)
-    audit.record_timing("step2_processing", elapsed_ms)
-    audit.add_step_completed("step2")
+    # 5. Parse and save structured output
+    parsed = json.loads(raw)
+    audit.save_json("parsed_output.json", parsed, subfolder=_STEP)
 
-    return FeatureResponse(session_id=request.session_id, result=parsed)
+    audit.stop_timer(_STEP)
+    return FeatureResponse(...)
 ```
+
+**Why save raw LLM output before parsing?** LLM responses can be malformed JSON. Saving the raw output before the `json.loads()` call means you can debug parse failures even after the exception is raised.
 
 ---
 
 ## Configuration Management
 
-### Pydantic Settings Pattern
+### Dotenv Settings Pattern
 
 ```python
-# app/components/base/config.py
-from pydantic_settings import BaseSettings
-from functools import lru_cache
-from typing import List
+# src/components/base/config.py
+from pathlib import Path
+from dotenv import load_dotenv
+import os
 
-class Settings(BaseSettings):
-    """Centralized configuration loaded from environment."""
+load_dotenv()
 
-    # Application
-    app_name: str = "My Application"
-    app_version: str = "1.0.0"
-    environment: str = "development"
+# LLM
+OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
+LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o")
+EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
 
-    # Server
-    host: str = "0.0.0.0"
-    port: int = 8000
+# Retrieval tuning
+TOP_K_RETRIEVAL: int = int(os.getenv("TOP_K_RETRIEVAL", "20"))
+TOP_K_FINAL: int = int(os.getenv("TOP_K_FINAL", "5"))
+RRF_K: int = int(os.getenv("RRF_K", "60"))
 
-    # CORS
-    cors_origins: List[str] = ["http://localhost:3000"]
+# Chunking
+CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "512"))
+CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "128"))
 
-    # LLM (example: Ollama)
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1:latest"
-    ollama_timeout: int = 120
-    ollama_temperature: float = 0.7
-    ollama_max_tokens: int = 4096
-
-    # Vector DB (example: ChromaDB)
-    chroma_persist_dir: str = "./data/chroma"
-
-    # Paths
-    data_dir: str = "./data"
-    sessions_dir: str = "./sessions"
-    uploads_dir: str = "./data/uploads"
-
-    class Config:
-        env_file = ".env"
-        extra = "ignore"  # Ignore extra env vars
-
-@lru_cache()
-def get_settings() -> Settings:
-    """Singleton settings (cached by lru_cache decorator)."""
-    return Settings()
+# Paths
+BASE_DIR = Path(__file__).resolve().parents[3]
+RAW_DATA_DIR = BASE_DIR / "data" / "raw"
+CHROMA_PERSIST_DIR = str(BASE_DIR / "data" / "chroma_db")
+BM25_INDEX_PATH = str(BASE_DIR / "data" / "bm25_index.pkl")
+DOMAIN_CONFIG_PATH = BASE_DIR / "config" / "domain.json"
 ```
 
 ### Configuration Hierarchy
@@ -751,22 +721,20 @@ Settings are loaded in this priority order (highest to lowest):
 
 1. **Environment variables** (highest priority)
 2. **.env file**
-3. **Default values** (in Settings class)
+3. **Default values** (in `os.getenv("KEY", "default")` calls)
 
-### Using Settings
+### Key Environment Variables
 
-```python
-from app.components.base.config import get_settings
-
-settings = get_settings()
-
-# Use settings throughout the application
-client = OllamaClient(
-    base_url=settings.ollama_base_url,
-    model=settings.ollama_model,
-    timeout=settings.ollama_timeout,
-)
-```
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `OPENAI_API_KEY` | *(required)* | OpenAI API authentication |
+| `LLM_MODEL` | `gpt-4o` | Model for decomposition and generation |
+| `EMBEDDING_MODEL` | `text-embedding-3-large` | Model for dense embeddings |
+| `TOP_K_RETRIEVAL` | `20` | Results per individual search call |
+| `TOP_K_FINAL` | `5` | Distinct stories after deduplication |
+| `RRF_K` | `60` | RRF rank dampening constant |
+| `CHUNK_SIZE` | `512` | Tokens per ingestion chunk |
+| `CHUNK_OVERLAP` | `128` | Token overlap between chunks |
 
 ---
 
@@ -775,125 +743,118 @@ client = OllamaClient(
 ### Exception Hierarchy
 
 ```python
-# app/components/base/exceptions.py
-from typing import Dict, Any, Optional
+# src/components/base/exceptions.py
 
-class ComponentError(Exception):
-    """Base exception for all component errors."""
+class LLMResponseError(Exception):
+    """Raised when LLM output cannot be parsed as valid JSON."""
 
-    def __init__(
-        self,
-        message: str,
-        component: str,
-        details: Optional[Dict[str, Any]] = None,
-    ):
-        self.message = message
+    def __init__(self, component: str, raw_response: str, reason: str):
         self.component = component
-        self.details = details or {}
-        super().__init__(message)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialize for API response."""
-        return {
-            "error": self.__class__.__name__,
-            "message": self.message,
-            "component": self.component,
-            "details": self.details,
-        }
-
-# Specific exceptions
-class SessionNotFoundError(ComponentError):
-    """Session does not exist."""
-    pass
-
-class LLMUnavailableError(ComponentError):
-    """LLM service is unavailable."""
-    pass
-
-class ResponseParsingError(ComponentError):
-    """Failed to parse LLM response."""
-    pass
-
-class ValidationError(ComponentError):
-    """Input validation failed."""
-    pass
+        self.raw_response = raw_response
+        self.reason = reason
+        super().__init__(f"[{component}] LLM response parse failed: {reason}")
 ```
 
-### Error Handling in Routes
+### Component ID Validation — Hallucination Guard
+
+After GPT-4o returns a component mapping, the generation service **validates every returned component ID against `domain.json`** and strips any that don't exist:
 
 ```python
-@router.post("/process", response_model=FeatureResponse)
-async def process(
-    request: FeatureRequest,
-    service: FeatureService = Depends(get_service),
-):
-    try:
-        return await service.process(request)
-    except ComponentError as e:
-        raise HTTPException(status_code=400, detail=e.to_dict())
-    except Exception as e:
-        logger.exception("unexpected_error", error=str(e))
-        raise HTTPException(status_code=500, detail={"error": "Internal server error"})
+# src/components/generation/service.py
+
+# Validate that all component IDs exist in domain.json
+valid_ids = {c["id"] for c in components}
+for category in ("functional_components", "technical_components"):
+    mapping[category] = [
+        comp for comp in mapping.get(category, [])
+        if comp.get("component_id") in valid_ids
+    ]
+
+# Enforce top-N limits — sort by confidence_score desc, then slice
+limits = {"functional_components": TOP_N_FUNCTIONAL, "technical_components": TOP_N_TECHNICAL}
+for category, limit in limits.items():
+    mapping[category] = sorted(
+        mapping.get(category, []),
+        key=lambda c: float(c.get("confidence_score", 0)),
+        reverse=True,
+    )[:limit]
 ```
+
+**Why validate?** GPT-4o can hallucinate component IDs that look plausible (`FC-099`) but don't exist in the catalogue. Silent acceptance would corrupt downstream systems consuming the mapping. The validation step ensures only real IDs from `domain.json` are ever returned.
 
 ### Error Handling in Agents
 
 ```python
-async def my_agent(state: Dict[str, Any]) -> Dict[str, Any]:
+async def feature_agent(state: dict[str, Any]) -> dict[str, Any]:
     try:
-        # Normal processing
-        return {
-            "output": result,
-            "status": "step_complete",
-        }
-    except ComponentError as e:
-        # Return error state - workflow routes to error_handler
-        return {
-            "status": "error",
-            "error_message": str(e),
-            "current_agent": "error_handler",
-        }
+        response = await _get_service().process(request)
+        return {"output": response.result, "status": "complete"}
+    except LLMResponseError as e:
+        return {"status": "error", "error_message": str(e)}
+    except Exception as e:
+        return {"status": "error", "error_message": f"Unexpected: {e}"}
 ```
 
 ---
 
 ## Async Patterns
 
-### Async Service Methods
+### AsyncOpenAI for LLM Calls
 
-All I/O-bound operations should be async:
+All LLM calls use `AsyncOpenAI` (not the sync client):
 
 ```python
-class MyService(BaseComponent[Request, Response]):
+from openai import AsyncOpenAI
 
-    async def process(self, request: Request) -> Response:
-        """Main entry point - async."""
-        # Parallel operations when possible
-        result1, result2 = await asyncio.gather(
-            self._fetch_data(request.id),
-            self._call_llm(request.text),
+class GenerationService(BaseComponent[...]):
+    def __init__(self) -> None:
+        self._client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+    async def process(self, request: GenerationRequest) -> GenerationResponse:
+        response = await self._client.chat.completions.create(
+            model=LLM_MODEL,
+            temperature=0,           # Deterministic output for mapping tasks
+            messages=[
+                {"role": "system", "content": "Output valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
         )
-        return Response(data=result1, analysis=result2)
-
-    async def _fetch_data(self, id: str) -> dict:
-        """Async HTTP call."""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{self.api_url}/{id}")
-            return response.json()
-
-    async def _call_llm(self, text: str) -> str:
-        """Async LLM call."""
-        return await self.llm_client.generate(text)
+        content = response.choices[0].message.content or "{}"
 ```
 
-### Async Agent Functions
+**Why `temperature=0`?** Component mapping is a deterministic lookup task — the same story should always produce the same mapping. Temperature 0 removes sampling randomness, maximizing reproducibility.
+
+### Pipeline Invocation
+
+The CLI uses `asyncio.run()` to run the async pipeline from a synchronous entry point:
 
 ```python
-async def my_agent(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Agent nodes must be async for workflow execution."""
-    service = get_service()
-    response = await service.process(request)
-    return {"output": response.model_dump()}
+# main.py
+import asyncio
+
+async def main(story: str) -> None:
+    pipeline = build_pipeline()
+    result = await pipeline.ainvoke({
+        "session_id": str(uuid4()),
+        "input_story": story,
+        "status": "started",
+    })
+    print(json.dumps(result["component_mapping"], indent=2))
+
+if __name__ == "__main__":
+    asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else SAMPLE_STORY))
+```
+
+### Parallel Async Operations
+
+Use `asyncio.gather()` for independent concurrent operations:
+
+```python
+# Run both dense searches in parallel
+dense_func, dense_tech = await asyncio.gather(
+    self._chroma.aquery(request.functional_query, top_k=TOP_K_RETRIEVAL),
+    self._chroma.aquery(request.technical_query, top_k=TOP_K_RETRIEVAL),
+)
 ```
 
 ---
@@ -903,52 +864,132 @@ async def my_agent(state: Dict[str, Any]) -> Dict[str, Any]:
 ### When to Use Singletons
 
 Use singletons for services that:
-- Are expensive to initialize (DB connections, model loading)
+- Are expensive to initialize (DB connections, model loading, BM25 index loading)
 - Should maintain consistent state across requests
 - Are stateless (don't need per-request isolation)
 
-### Singleton Implementation Pattern
+### Function-Based Singleton (Preferred)
 
 ```python
-# Module-level singleton
-_instance: Optional["MyService"] = None
+# src/components/{feature}/agent.py
+_service: FeatureService | None = None
 
-class MyService:
-    """Service with singleton pattern."""
-
-    def __init__(self):
-        # Expensive initialization
-        self.connection = self._connect()
-
-    @classmethod
-    def get_instance(cls) -> "MyService":
-        """Get or create singleton instance."""
-        global _instance
-        if _instance is None:
-            _instance = cls()
-        return _instance
-
-# Usage
-service = MyService.get_instance()
-```
-
-### Alternative: Function-Based Singleton
-
-```python
-_service: MyService | None = None
-
-def get_service() -> MyService:
-    """Singleton getter function."""
+def _get_service() -> FeatureService:
+    """Lazy singleton init — service created on first call only."""
     global _service
     if _service is None:
-        _service = MyService()
+        _service = FeatureService()
     return _service
 
-# In router
-@router.post("/endpoint")
-async def endpoint(service: MyService = Depends(get_service)):
-    return await service.process()
+async def feature_agent(state: dict) -> dict:
+    service = _get_service()
+    # ...
 ```
+
+### Singleton for Search Infrastructure
+
+The Chroma and BM25 stores are singletons because loading the serialized BM25 index and connecting to Chroma are expensive operations:
+
+```python
+# src/components/hybrid_search/agent.py
+_service: HybridSearchService | None = None
+
+def _get_service() -> HybridSearchService:
+    global _service
+    if _service is None:
+        chroma = ChromaStore()        # Connects to Chroma, loads embedding model
+        bm25 = BM25Index.load(...)    # Deserializes index file from disk
+        _service = HybridSearchService(chroma=chroma, bm25=bm25)
+    return _service
+```
+
+---
+
+## LLM Prompt Authoring
+
+### XML Tag Section Delimiters
+
+All LLM prompts use XML/HTML-style tags to mark logical sections. This is preferred over markdown `##` headings because:
+
+- **Unambiguous boundaries** — angle-bracket tags cannot appear as literal content inside most domain text, whereas `##` headings can
+- **Consistent parsing** — GPT-4o and Claude both have strong structural awareness of XML-style tags in prompts
+- **Easier diffs** — section additions/removals are immediately visible
+
+### Standard Tag Vocabulary
+
+| Tag | Purpose |
+|-----|---------|
+| `<task>` | Describes what the model must do |
+| `<rules>` | Hard constraints the model must obey |
+| `<input_story>` | The Jira user story being processed |
+| `<component_catalogue>` | Injected domain catalogue content |
+| `<supporting_evidence>` | RAG-retrieved historical stories + TDDs |
+| `<output_format>` | JSON schema / response format instructions |
+
+### Decomposition Prompt Structure
+
+```
+You are a query decomposition engine for a healthcare payer system.
+
+<task>
+... description of what to produce ...
+</task>
+
+<rules>
+- Constraint 1
+- Constraint 2
+- Output valid JSON only. No markdown fencing.
+</rules>
+
+<input_story>
+{story}
+</input_story>
+
+<output_format>
+{{"functional_query": "...", "technical_query": "..."}}
+</output_format>
+```
+
+### Generation Prompt Structure
+
+```
+You are a component mapping engine for a healthcare payer system.
+
+<task>
+... description of what to produce ...
+</task>
+
+<component_catalogue>
+{component_catalogue}
+</component_catalogue>
+
+<rules>
+- Only use component IDs from the catalogue above
+- Output valid JSON only. No markdown fencing.
+</rules>
+
+<input_story>
+{input_story}
+</input_story>
+
+<supporting_evidence>
+{evidence}
+</supporting_evidence>
+
+<output_format>
+{{"functional_components": [...], "technical_components": [...]}}
+</output_format>
+```
+
+### Rules for New Prompts
+
+When adding a new `prompts.py`:
+
+1. Always wrap dynamic injected content (catalogue, evidence, story) in its own named tag pair
+2. Group all hard constraints in a single `<rules>` block
+3. Keep output format instructions in `<output_format>` — never inline them with the task description
+4. The JSON-only instruction (`no markdown fencing`) must live inside `<rules>` or `<output_format>`, not in prose
+5. Validate LLM output against known IDs/schema after parsing — never trust the model alone
 
 ---
 
@@ -958,15 +999,15 @@ async def endpoint(service: MyService = Depends(get_service)):
 
 When creating a new component:
 
-- [ ] Create directory: `app/components/{feature}/`
-- [ ] Create `models.py` with Request/Response schemas
-- [ ] Create `service.py` extending BaseComponent
-- [ ] Create `agent.py` with singleton getter and agent function
-- [ ] Create `router.py` with FastAPI endpoints
-- [ ] Create `prompts.py` if using LLM
-- [ ] Add router to `app/main.py`
-- [ ] Add agent to workflow graph (if applicable)
-- [ ] Write tests
+- [ ] Create directory: `src/components/{feature}/`
+- [ ] Create `models.py` with Request/Response dataclasses
+- [ ] Create `service.py` extending `BaseComponent`
+- [ ] Create `agent.py` with `_get_service()` lazy singleton and agent function
+- [ ] Add agent to workflow graph in `orchestrator/workflow.py`
+- [ ] Add state fields to `PipelineState` in `orchestrator/state.py`
+- [ ] Add `prompts.py` if using LLM
+- [ ] Add `router.py` if exposing via REST
+- [ ] Add timing/audit to service `process()` method
 
 ### State Update Rules
 
@@ -974,40 +1015,42 @@ When creating a new component:
 |------|-------------|
 | Return partial | Only return changed fields |
 | No copying | Don't copy unchanged state fields |
-| Use reducers | For append-only fields (messages, logs) |
-| Status tracking | Always update `status` and `current_agent` |
-| Error routing | Set `status: "error"` for workflow routing |
+| Status tracking | Always update `status` field |
+| Error routing | Set `status: "error"` + `error_message` for failure |
 
 ### File Naming Conventions
 
 | File | Purpose |
 |------|---------|
-| `models.py` | Pydantic request/response schemas |
+| `models.py` | Dataclass request/response schemas |
 | `service.py` | Business logic (extends BaseComponent) |
-| `agent.py` | LangGraph node wrapper |
+| `agent.py` | LangGraph node wrapper + singleton getter |
 | `router.py` | FastAPI endpoints |
 | `prompts.py` | LLM prompt templates |
-| `__init__.py` | Public exports |
+| `chroma_store.py` | Dense vector store wrapper |
+| `bm25_index.py` | Sparse BM25 index wrapper |
 
 ### Common Patterns Summary
 
 | Pattern | Location | Purpose |
 |---------|----------|---------|
 | BaseComponent | `base/component.py` | Type-safe service interface |
-| Singleton | `*/agent.py`, `rag/*.py` | Expensive resource sharing |
-| Partial State | `orchestrator/state.py` | Workflow state management |
+| Singleton | `*/agent.py` | Expensive resource sharing |
+| Partial State | `orchestrator/state.py` | LangGraph state management |
+| Two-Pass RRF | `hybrid_search/service.py` | Balanced multi-source fusion |
+| Component ID Validation | `generation/service.py` | Hallucination guard |
 | Audit Trail | `utils/audit.py` | Session persistence |
 | Exception Hierarchy | `base/exceptions.py` | Consistent error handling |
-| Pydantic Settings | `base/config.py` | Configuration management |
+| Dotenv Settings | `base/config.py` | Configuration management |
 
----
+### Pipeline Constants Quick Reference
 
-## Next Steps
-
-1. **Copy the directory structure** to your new project
-2. **Implement BaseComponent** and exception hierarchy
-3. **Create your first component** following the pattern
-4. **Add workflow orchestration** if needed
-5. **Set up audit trail** for debugging and compliance
-
-This guide provides the foundational patterns. Adapt them to your specific requirements while maintaining the core principles of isolation, type safety, and async-first design.
+| Constant | Default | File |
+|----------|---------|------|
+| `LLM_MODEL` | `gpt-4o` | `base/config.py` |
+| `EMBEDDING_MODEL` | `text-embedding-3-large` | `base/config.py` |
+| `TOP_K_RETRIEVAL` | `20` | `base/config.py` |
+| `TOP_K_FINAL` | `5` | `base/config.py` |
+| `RRF_K` | `60` | `base/config.py` |
+| `CHUNK_SIZE` | `512` | `base/config.py` |
+| `CHUNK_OVERLAP` | `128` | `base/config.py` |
